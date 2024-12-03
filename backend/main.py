@@ -1,7 +1,13 @@
-from fastapi import FastAPI, UploadFile, HTTPException, APIRouter
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+
+import logging
+import sys
+import uvicorn
+from database import Database, ChatDatabase, MessageDatabase
 from pydantic import BaseModel
 from typing import List, Optional
+from pathlib import Path
 import os
 
 from llama_index.core import (
@@ -11,239 +17,244 @@ from llama_index.core import (
     Settings,
     load_index_from_storage
 )
+
 from llama_index.embeddings.llamafile import LlamafileEmbedding
 from llama_index.llms.llamafile import Llamafile
 from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.llms import ChatMessage
+
+Settings.embed_model = LlamafileEmbedding(
+    base_url="http://localhost:8080",
+)
+
+Settings.llm = Llamafile(
+    base_url="http://localhost:8080",
+    timeout=300.0,
+    request_timeout=300.0,
+)
+
+Settings.transformations = [
+    SentenceSplitter(
+        chunk_size=256,
+        chunk_overlap=5
+    )
+]
 
 app = FastAPI()
 
-import logging
+origins = [
+    "http://localhost:3000",
+]
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('app.log')
-    ]
-)
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-# Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Configure LlamaIndex
-Settings.embed_model = LlamafileEmbedding(
-    base_url="http://localhost:8080",
-    timeout=60000
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('app.log', encoding='utf-8')
+    ]
 )
-Settings.llm = Llamafile(
-    base_url="http://localhost:8080",
-    temperature=0,
-    seed=0,
-    timeout=60000
-)
-Settings.transformations = [
-    SentenceSplitter(
-        chunk_size=256,
-        chunk_overlap=1
-    )
-]
+logger = logging.getLogger(__name__)
 
-class MessageRequest(BaseModel):
-    message: str
+db = Database('database/sqlite3.db')
+chat_db = ChatDatabase(db)
+message_db = MessageDatabase(db)
+
+class CreateChatRequest(BaseModel):
+    title: str
+
+class DocumentEmbedRequest(BaseModel):
+    file_path: str
 
 class Message(BaseModel):
     role: str
     content: str
 
 class ChatRequest(BaseModel):
-    messages: List[Message]
     model: str
+    messages: List[Message]
     stream: Optional[bool] = False
+    max_tokens: Optional[int] = None
+    max_completion_tokens: Optional[int] = None
+    top_p: Optional[float] = None
+    temperature: Optional[float] = None
+    seed: Optional[int] = None
+    presence_penalty: Optional[float] = None
+    frequency_penalty: Optional[float] = None
+    user: Optional[str] = None
+    stop: Optional[List[str]] = None
+    response_format: Optional[str] = None
 
-index = None
+def get_embedding_path(chat_id: str):
+    return f"database/embeddings/{chat_id}"
 
-# Modified chat completion endpoint
-@app.post("/v1/chat/completions")
-async def create_chat_completion(request: ChatRequest):
-    global index
+@app.get('/chats')
+async def get_chats():
     try:
-        if index is None:
-            storage_context = StorageContext.from_defaults(persist_dir="./storage")
-            index = load_index_from_storage(storage_context)
-        
-        # Configure query engine with more specific parameters
-        query_engine = index.as_query_engine(
-            similarity_top_k=2,
-            streaming=request.stream,
-            response_mode="compact",
-            chunk_size=128,
-            chunk_overlap=20,
-        )
-        
-        # Get the last user message
-        last_message = next((msg for msg in reversed(request.messages) if msg.role == "user"), None)
-        if not last_message:
-            raise HTTPException(status_code=400, detail="No user message found")
-        
-        # Optimize the query construction
-        query = last_message.content
-        if len(request.messages) > 1:
-            # Limit conversation history to reduce processing time
-            conversation_history = "\n".join([
-                f"{msg.role}: {msg.content}" 
-                for msg in request.messages[-2:]  # Only include last message for context
-            ])
-            query = f"Previous context:\n{conversation_history}\n\nQuestion: {query}"
-        
-        try:
-            # Set a more reasonable timeout for the query operation
-            response = await query_engine.query(query)
-            
-            if not response:
-                raise HTTPException(
-                    status_code=500,
-                    detail="Empty response from query engine"
-                )
-                
-            return {
-                "message": {
-                    "role": "assistant",
-                    "content": str(response)
-                }
+        chats = chat_db.get_all_chats()
+        return [
+            {
+                "chat_id": chat.chat_id,
+                "title": chat.title,
+                "created_at": chat.created_at.isoformat(),
+                "updated_at": chat.updated_at.isoformat()
             }
-            
-        except Exception as query_error:
-            logger.error(f"Query engine error: {str(query_error)}")
-            raise HTTPException(
-                status_code=504,  # Gateway Timeout
-                detail="Query engine timed out or failed to respond"
+            for chat in chats
+        ]
+    except Exception as e:
+        logger.error(f"Error getting chats: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post('/chats')
+async def create_chat(request: CreateChatRequest):
+    try:
+        chat = chat_db.create_chat(request.title)
+        messages = message_db.get_chat_messages(chat.chat_id)
+        
+        return {
+            "chat_id": chat.chat_id,
+            "title": chat.title,
+            "created_at": chat.created_at.isoformat(),
+            "updated_at": chat.updated_at.isoformat(),
+            "messages": [
+                {
+                    "message_id": message.message_id,
+                    "chat_id": message.chat_id,
+                    "role": message.role,
+                    "content": message.content,
+                    "created_at": message.created_at.isoformat()
+                }
+                for message in messages
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Error creating chat: {str(e)}", exc_info=True)
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get('/chats/{chat_id}/messages')
+async def get_chat_messages(chat_id: str):
+    messages = message_db.get_chat_messages(chat_id)
+    return [
+        {
+            "message_id": message.message_id,
+            "chat_id": message.chat_id,
+            "role": message.role,
+            "content": message.content,
+            "created_at": message.created_at.isoformat()
+        }
+        for message in messages
+    ]
+
+@app.post('/chats/{chat_id}/completion')
+async def chat_completion(chat_id: str, request: ChatRequest):
+    try:
+        message_db.add_message(chat_id, request.messages[-1].role, request.messages[-1].content)
+        
+        embedding_path = get_embedding_path(chat_id)
+        embedding_dir = Path(embedding_path)
+        response = None
+        
+        if embedding_dir.exists():
+            try:
+                storage_context = StorageContext.from_defaults(persist_dir=embedding_path)
+                index = load_index_from_storage(storage_context)
+                query_engine = index.as_query_engine(
+                    similarity_top_k=3,
+                    response_mode="compact",
+                    timeout=300.0
+                )
+                user_query = request.messages[-1].content
+                query_response = query_engine.query(user_query)
+                logger.info(f"Query response: {query_response}")
+                if query_response and str(query_response).strip():
+                    response = query_response
+            except Exception as e:
+                logger.error(f"Error using query engine: {str(e)}")
+                logger.debug("Falling back to LLM due to query engine error")
+
+        if response is None:
+            llm = Settings.llm
+            chat_messages = [ChatMessage(role=msg.role, content=msg.content) for msg in request.messages]
+            response = await llm.achat(
+                    messages=chat_messages,
             )
-            
+            response = response.message.content
+            logger.debug(f"LLM response: {response}")
+
+        message_db.add_message(chat_id, "assistant", str(response))
+        
+        return {"message": str(response)}
     except Exception as e:
         logger.error(f"Error in chat completion: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal server error: {str(e)}"
-)
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/v1/encode")
-async def encode_document(file: UploadFile):
+@app.post('/chats/{chat_id}/embed')
+async def embed_chat(chat_id: str, file: UploadFile = File(...)):
     try:
-        # Create storage directory if it doesn't exist
-        storage_path = "./storage"
-        os.makedirs(storage_path, exist_ok=True)
+        embedding_path = get_embedding_path(chat_id)
+
+        temp_file_path = f"/tmp/{file.filename}"
+        with open(temp_file_path, "wb") as buffer:
+            buffer.write(await file.read())
+
+        reader = SimpleDirectoryReader(input_files=[temp_file_path])
+        documents = reader.load_data()
         
-        # Create temporary directory
-        temp_path = "./temp"
-        os.makedirs(temp_path, exist_ok=True)
-        temp_file_path = os.path.join(temp_path, file.filename)
-        
-        logger.info(f"Processing file: {file.filename}")
-        
-        try:
-            # Save uploaded file temporarily
-            content = await file.read()
-            with open(temp_file_path, "wb") as f:
-                f.write(content)
-            
-            logger.info(f"File saved to temp: {temp_file_path}")
-            
-            # Load documents
-            reader = SimpleDirectoryReader(input_files=[temp_file_path])
-            documents = reader.load_data()
-            
-            # Create new storage context and index without trying to load existing
-            storage_context = StorageContext.from_defaults()  # Remove persist_dir here
+        if Path(embedding_path).exists():
+            storage_context = StorageContext.from_defaults(persist_dir=embedding_path)
+            index = load_index_from_storage(storage_context)
+            for doc in documents:
+                index.insert(doc)
+        else:
+            Path(embedding_path).mkdir(parents=True, exist_ok=True)
             index = VectorStoreIndex.from_documents(
                 documents,
-                storage_context=storage_context,
                 show_progress=True
             )
             
-            # Persist the index after creation
-            index.storage_context.persist(persist_dir=storage_path)
-            logger.info("Index persisted successfully")
-            
-            return {"success": True, "message": "Document processed successfully"}
-            
-        finally:
-            # Clean up temp file
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-                logger.info(f"Cleaned up temp file: {temp_file_path}")
-            
+        index.storage_context.persist(persist_dir=embedding_path)
+
+        os.remove(temp_file_path)
+        
+        return {"message": "Successfully embedded document"}
     except Exception as e:
-        logger.error(f"Error processing document: {str(e)}", exc_info=True)
+        logger.error(f"Error embedding document: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-class MindmapRequest(BaseModel):
-    prompt: str
-    context: str | None = None
-
-class MindmapResponse(BaseModel):
-    markdown: str
-
-router = APIRouter()
-
-@router.post("/v1/generate-mindmap", response_model=MindmapResponse)
-async def generate_mindmap(request: MindmapRequest):
-    global index
+@app.post('/chats/{chat_id}/generate-mindmap')
+async def generate_mindmap(chat_id: str):
     try:
-        if index is None:
-            storage_context = StorageContext.from_defaults(persist_dir="./storage")
-            index = load_index_from_storage(storage_context)
-
-        # Construct the prompt for mindmap generation
-        base_prompt = """Generate a hierarchical mindmap in markdown format about the topic below. 
-        Use only headings (##, ###, etc) and bullet points (-).
-        Keep it concise and well-structured with 2-3 levels of depth.
+        messages = message_db.get_chat_messages(chat_id)
         
-        Topic: {topic}"""
+        system_prompt = """Generate a structured learning roadmap in markdown format.
+        The roadmap should have a main topic as heading level 1 (#),
+        major categories as heading level 2 (##),
+        and bullet points (-) for specific topics.
+        Keep it concise and well-organized."""
         
-        if request.context:
-            base_prompt += "\nContext: {context}"
-
-        # Configure query engine for structured output
-        query_engine = index.as_query_engine(
-            similarity_top_k=3,
-            response_mode="tree",
-            structured_answer_filtering=True
-        )
-
-        # Format the final prompt
-        formatted_prompt = base_prompt.format(
-            topic=request.prompt,
-            context=request.context if request.context else ""
-        )
-
-        # Get response from query engine
-        response = await query_engine.query(formatted_prompt)
-
-        # Format the markdown with markmap metadata
-        markdown_content = f"""---
-title: {request.prompt}
-markmap:
-  colorFreezeLevel: 2
----
-
-{str(response)}"""
-
-        return MindmapResponse(markdown=markdown_content)
-
+        chat_history = "\n".join([f"{msg.role}: {msg.content}" for msg in messages])
+        user_prompt = f"Based on this chat history, create a learning roadmap:\n{chat_history}"
+        
+        llm = Settings.llm
+        response = await llm.achat(messages=[
+            ChatMessage(role="system", content=system_prompt),
+            ChatMessage(role="user", content=user_prompt)
+        ])
+        
+        return {"message": response.message.content}
     except Exception as e:
         logger.error(f"Error generating mindmap: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to generate mindmap: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == '__main__':
+    uvicorn.run("main:app", host='0.0.0.0', port=8000, reload=True)

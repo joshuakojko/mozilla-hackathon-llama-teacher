@@ -1,21 +1,22 @@
-export type Message = {
+export interface ChatHistory {
+  chat_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  messages?: Message[];
+}
+
+export interface Message {
+  message_id: number;
+  chat_id: string;
   role: 'system' | 'user' | 'assistant';
   content: string;
-};
-
-export type ChatCompletionRequest = {
-  model: string;
-  messages: Message[];
-  stream: boolean;
-  temperature?: number;
-  max_tokens?: number;
-};
+  created_at: string;
+  id?: string;
+}
 
 export interface ChatCompletionResponse {
-  message: {
-    role: string;
-    content: string;
-  };
+  message: string;
 }
 
 export interface UploadResponse {

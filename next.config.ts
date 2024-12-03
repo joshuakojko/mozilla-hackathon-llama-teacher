@@ -4,8 +4,8 @@ const nextConfig: NextConfig = {
   async rewrites() {
     return [
       {
-        source: '/v1/:path*',
-        destination: 'http://localhost:8000/v1/:path*',
+        source: '/chats/:path*',
+        destination: 'http://localhost:8000/chats/:path*',
       },
     ];
   },

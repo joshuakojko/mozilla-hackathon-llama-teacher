@@ -1,54 +1,44 @@
-'use client';
+"use client";
 
-import { useState } from 'react';
-import { Input } from '@/components/ui/input';
-import { useToast } from '@/hooks/use-toast';
-import { uploadDocument } from '@/lib/api';
+import { useState } from "react";
+import { Input } from "@/components/ui/input";
+import { useToast } from "@/hooks/use-toast";
+import { embedDocument } from '@/lib/actions/chat';
 
 interface FileUploadProps {
-  onUpload: (file: File) => Promise<void>;
+  currentChatId: string | null;
 }
 
-export function FileUpload({ onUpload }: FileUploadProps) {
+export function FileUpload({ currentChatId }: FileUploadProps) {
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
     if (!file) return;
 
-    console.log('File selected:', {
-      name: file.name,
-      type: file.type,
-      size: file.size
-    });
-
-    setIsLoading(true);
-    try {
-      console.log('Starting file upload...');
-      const result = await uploadDocument(file);
-      console.log('Upload result:', result);
-      
-      await onUpload(file);
-      console.log('onUpload callback completed');
-      
+    if (!currentChatId) {
       toast({
-        title: 'Success',
-        description: result.message || 'File uploaded and processed successfully',
+        title: "Error",
+        description: "Please start a chat first",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      setIsLoading(true);
+      await embedDocument(currentChatId, file);
+
+      toast({
+        title: "Success",
+        description: "File uploaded and embedded successfully",
       });
     } catch (error) {
-      console.error('Failed to process file:', {
-        fileName: file.name,
-        fileType: file.type,
-        fileSize: file.size,
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined
-      });
-      
       toast({
-        title: 'Error',
-        description: error instanceof Error ? error.message : 'Failed to process file',
-        variant: 'destructive',
+        title: "Error",
+        description: "Failed to upload file",
+        variant: "destructive",
       });
     } finally {
       setIsLoading(false);
@@ -64,7 +54,9 @@ export function FileUpload({ onUpload }: FileUploadProps) {
         disabled={isLoading}
         className="max-w-xs"
       />
-      {isLoading && <span className="text-sm text-muted-foreground">Processing...</span>}
+      {isLoading && (
+        <span className="text-sm text-muted-foreground">Processing...</span>
+      )}
     </div>
   );
-} 
+}

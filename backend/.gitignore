@@ -1,6 +1,5 @@
 __pycache__
 .venv
-storage
-temp
-requirements.txt
 app.log
+requirements.txt
+database/

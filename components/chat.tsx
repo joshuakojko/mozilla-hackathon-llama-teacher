@@ -1,141 +1,243 @@
-'use client';
-
-import { useState } from 'react';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { FileUpload } from '@/components/file-upload';
-import { Button } from '@/components/ui/button';
-import { Textarea } from '@/components/ui/textarea';
-import { ScrollArea } from '@/components/ui/scroll-area';
-import { ChatMessage } from '@/components/chat-message';
-import { MindmapView } from '@/components/mindmap-view';
-import { Message } from '@/lib/types';
-import { useToast } from '@/hooks/use-toast';
-import { createChatCompletion, generateMindmap, uploadDocument } from '@/lib/api';
+import { useChat, Message as AiMessage } from "ai/react";
+import { useState, useRef, useEffect } from "react";
+import { ChatMessage } from "./chat-message";
+import { ChatInput } from "./chat-input";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { MarkmapComponent } from "./mindmap-view";
+import { ChatSidebar } from "./chat-sidebar";
+import { ChatHistory, Message } from "@/lib/types";
+import * as api from "@/lib/actions/chat";
+import { useToast } from "@/hooks/use-toast";
+import { FileUpload } from "./file-upload";
 
 export function Chat() {
-  const [messages, setMessages] = useState<Message[]>([{
-    role: 'assistant',
-    content: "Hi, I'm Llama Tutor, a personalized learning assistant. Feel free to ask me questions about homework, lecture notes, or upcoming tests!"
-  }]);
-  const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [mindmapMarkdown, setMindmapMarkdown] = useState('');
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  const [chatHistory, setChatHistory] = useState<ChatHistory[]>([]);
+  const { messages, append, setMessages } = useChat({});
   const { toast } = useToast();
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [roadmapData, setRoadmapData] = useState<string | null>(null);
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
 
-  const handleUpload = async (file: File) => {
+  useEffect(() => {
+    console.log("Component mounted, loading chat history");
+    loadChatHistory();
+    setIsInitialLoad(false);
+  }, []);
+
+  const loadChatHistory = async () => {
     try {
-      const result = await uploadDocument(file);
-      setMessages(prev => [...prev, {
-        role: 'system',
-        content: `Document "${file.name}" has been processed and is ready for querying.`,
-      }]);
+      const chats = await api.getUserChats();
+      if (Array.isArray(chats) && chats.length > 0) {
+        console.log("Chat successfully initialized", chats);
+        setChatHistory(chats);
+        if (isInitialLoad && !currentChatId) {
+          await handleSelectChat(chats[0].chat_id);
+        }
+      } else {
+        console.log("No existing chats found, creating new chat...");
+        const newChat = await api.createChat(new Date().toLocaleDateString());
+        console.log("New chat created:", newChat);
+        await loadChatHistory();
+      }
     } catch (error) {
-      console.error('Upload error:', error);
-      throw error;
+      const errorMessage =
+        error instanceof Error ? error.message : "Failed to load chat history";
+      console.error("Error loading chat history:", errorMessage);
+      toast({
+        title: "Error",
+        description: errorMessage,
+        variant: "destructive",
+      });
     }
   };
 
-  const handleSubmit = async () => {
-    if (!input.trim() || isLoading) return;
-    
-    const userMessage: Message = {
-      role: 'user',
-      content: input,
-    };
-
-    setMessages(prev => [...prev, userMessage]);
-    setInput('');
-    setIsLoading(true);
-
+  const handleSelectChat = async (id: string) => {
     try {
-      const result = await createChatCompletion([...messages, userMessage]);
-      setMessages(prev => [...prev, result.message]);
+      if (!id) {
+        console.error("Invalid chat ID:", id);
+        return;
+      }
+
+      console.log("Selected chat ID:", id);
+      setCurrentChatId(id);
+
+      const dbMessages = await api.getChatMessages(id);
+      console.log("Loaded messages:", dbMessages);
+
+      if (Array.isArray(dbMessages) && dbMessages.length > 0) {
+        const formattedMessages = dbMessages.map(
+          (msg) =>
+            ({
+              id: msg.message_id.toString(),
+              role: msg.role,
+              content: msg.content,
+            } as AiMessage)
+        );
+
+        setMessages(formattedMessages);
+      }
+
+      if (!isInitialLoad) {
+        await loadChatHistory();
+      }
     } catch (error) {
-      console.error('Chat error:', error);
+      console.error("Error loading chat:", error);
       toast({
-        title: 'Error',
-        description: 'Failed to get response',
-        variant: 'destructive',
+        title: "Error",
+        description: "Failed to load chat",
+        variant: "destructive",
       });
-    } finally {
-      setIsLoading(false);
     }
   };
 
-  const handleGenerateMindmap = async () => {
-    if (!input.trim() || isLoading) return;
-    setIsLoading(true);
-
+  const handleSendMessage = async (message: string) => {
     try {
-      const result = await generateMindmap({
-        prompt: input,
-        context: messages.map(m => m.content).join('\n'),
-      });
-      setMindmapMarkdown(result.markdown);
+      if (!currentChatId) {
+        const newChat = await api.createChat("New Chat");
+        setCurrentChatId(newChat.chat_id);
+        await loadChatHistory();
+      }
+
+      const userMessage: Message = {
+        role: "user",
+        content: message,
+      };
+
+      await append({
+        role: "user",
+        content: message,
+      } as AiMessage);
+
+      const chatId = currentChatId!;
+      const response = await api.chatCompletion(chatId, [
+        ...messages.map(
+          (msg) =>
+            ({
+              role: msg.role === "data" ? "system" : msg.role,
+              content: msg.content,
+            } as Message)
+        ),
+        userMessage,
+      ]);
+
+      await append({
+        role: "assistant",
+        content: response.message,
+      } as AiMessage);
+
+      await loadChatHistory();
     } catch (error) {
-      console.error('Mindmap error:', error);
+      console.error("Error sending message:", error);
       toast({
-        title: 'Error',
-        description: 'Failed to generate mindmap',
-        variant: 'destructive',
+        title: "Error",
+        description: "Failed to send message",
+        variant: "destructive",
       });
-    } finally {
-      setIsLoading(false);
+    }
+  };
+
+  const handleNewChat = async () => {
+    try {
+      const newChat = await api.createChat("New Chat");
+      console.log("Created new chat:", newChat);
+
+      if (newChat && newChat.chat_id) {
+        await loadChatHistory();
+      } else {
+        throw new Error("Failed to create new chat");
+      }
+    } catch (error) {
+      console.error("Error creating new chat:", error);
+      toast({
+        title: "Error",
+        description: "Failed to create new chat",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, roadmapData]);
+
+  const handleGenerateRoadmap = async () => {
+    try {
+      if (!currentChatId) {
+        toast({
+          title: "Error",
+          description: "Please start a chat first",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const response = await api.generateRoadmap(currentChatId);
+
+      setRoadmapData(response.message);
+      await append({
+        role: "assistant",
+        content: "Here's your learning roadmap:",
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to generate roadmap",
+        variant: "destructive",
+      });
     }
   };
 
   return (
-    <div className="flex flex-col gap-4 max-w-4xl mx-auto p-4">
-      <FileUpload onUpload={handleUpload} />
-      
-      <Tabs defaultValue="chat" className="w-full">
-        <TabsList className="grid w-full grid-cols-2">
-          <TabsTrigger value="chat">Chat</TabsTrigger>
-          <TabsTrigger value="mindmap">Learning Roadmap</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="chat" className="mt-4">
-          <ScrollArea className="h-[500px] rounded-lg border p-4">
-            {messages.map((message, i) => (
-              <ChatMessage key={i} message={message} />
-            ))}
+    <div className="relative flex h-full flex-col">
+      <ChatSidebar
+        chatHistory={chatHistory}
+        onSelectChat={handleSelectChat}
+        onNewChat={handleNewChat}
+      />
+      <div className="min-h-screen bg-background flex flex-col items-center px-4">
+        <header className="w-full max-w-3xl text-center py-8 space-y-2">
+          <h1 className="text-4xl font-bold">Llama Teacher</h1>
+          <p className="text-lg text-muted-foreground">
+            Your personalized AI learning assistant. Completely local.
+          </p>
+        </header>
+        <main className="w-full max-w-3xl flex-1 flex flex-col">
+          <ScrollArea className="flex-1 px-4">
+            <div className="space-y-6 pb-6">
+              {messages.map((message) => {
+                const isRoadmapMessage =
+                  message.content === "Here's your learning roadmap:";
+                return (
+                  <div key={message.id}>
+                    <ChatMessage
+                      role={message.role as "assistant" | "user"}
+                      content={message.content}
+                    />
+                    {isRoadmapMessage && roadmapData && (
+                      <div className="mt-4">
+                        <MarkmapComponent markdown={roadmapData} />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              <div ref={messagesEndRef} />
+            </div>
           </ScrollArea>
-        </TabsContent>
-
-        <TabsContent value="mindmap" className="mt-4">
-          <MindmapView markdown={mindmapMarkdown} />
-        </TabsContent>
-
-        <div className="flex gap-2 mt-4">
-          <Textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask questions or request a learning roadmap..."
-            className="flex-1"
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSubmit();
-              }
-            }}
-          />
-          <div className="flex flex-col gap-2">
-            <Button 
-              onClick={handleSubmit}
-              disabled={isLoading}
-            >
-              Chat
-            </Button>
-            <Button 
-              onClick={handleGenerateMindmap}
-              disabled={isLoading}
-              variant="secondary"
-            >
-              Generate Roadmap
-            </Button>
+          <div className="sticky bottom-0 bg-background/80 backdrop-blur-sm p-4">
+            <ChatInput
+              onSendMessage={handleSendMessage}
+              onGenerateRoadmap={handleGenerateRoadmap}
+            />
+            <FileUpload currentChatId={currentChatId} />
           </div>
-        </div>
-      </Tabs>
+        </main>
+      </div>
     </div>
   );
 }

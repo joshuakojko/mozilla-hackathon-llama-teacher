@@ -1,34 +1,25 @@
-'use client';
+import { useEffect, useRef } from 'react'
+import { Transformer } from 'markmap-lib'
+import { Markmap } from 'markmap-view'
 
-import { useEffect, useRef } from 'react';
-import { Transformer } from 'markmap-lib';
-import { Markmap } from 'markmap-view';
-import { Card } from '@/components/ui/card';
-
-const transformer = new Transformer();
-
-interface MindmapViewProps {
-  markdown: string;
+interface MarkmapProps {
+  markdown: string
 }
 
-export function MindmapView({ markdown }: MindmapViewProps) {
-  const svgRef = useRef<SVGSVGElement>(null);
+export function MarkmapComponent({ markdown }: MarkmapProps) {
+  const svgRef = useRef<SVGSVGElement>(null)
 
   useEffect(() => {
-    if (!svgRef.current) return;
-    
-    const { root } = transformer.transform(markdown);
-    const mm = Markmap.create(svgRef.current);
-    mm.setData(root);
-    mm.fit();
-  }, [markdown]);
+    if (svgRef.current) {
+      const transformer = new Transformer()
+      const { root } = transformer.transform(markdown)
+      Markmap.create(svgRef.current, undefined, root)
+    }
+  }, [markdown])
 
   return (
-    <Card className="w-full h-[600px] overflow-hidden bg-white dark:bg-gray-900">
-      <svg 
-        ref={svgRef} 
-        className="w-full h-full"
-      />
-    </Card>
-  );
+    <div className="w-full h-[400px] bg-background rounded-lg shadow-inner overflow-hidden">
+      <svg ref={svgRef} className="w-full h-full" />
+    </div>
+  )
 }
