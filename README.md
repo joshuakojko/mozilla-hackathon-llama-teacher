@@ -23,6 +23,7 @@ A personalized AI learning assistant powered by Next.js and FastAPI. This applic
   - FastAPI
   - LlamaIndex
   - Llamafile for local LLM
+  - SQLite storage for chat persistence 
 
 ## Getting Started
 
@@ -36,7 +37,7 @@ A personalized AI learning assistant powered by Next.js and FastAPI. This applic
    chmod +x llava-v1.5-7b-q4.llamafile
 
    # Start the llamafile server
-   ./llava-v1.5-7b-q4.llamafile --server --host 127.0.0.1 --port 8080
+   ./llava-v1.5-7b-q4.llamafile --nobrowser --fast --embedding
    ```
 
 ### Installation
@@ -45,13 +46,22 @@ A personalized AI learning assistant powered by Next.js and FastAPI. This applic
    ```bash
    npm install
    ```
-
-2. Install backend dependencies:
+2. Start frontend server:
    ```bash
+   npm run dev
+   ```
+3. Create virtual environment:
+   ```bash
+   cd backend
+   python -m venv .venv
+   source .venv/bin/activate
+   ```
+4. Install backend dependencies
+   ```bash
+   pip freeze -> requirements.txt
    pip install -r requirements.txt
    ```
-
-3. Start the backend server:
+5. Start the backend server:
    ```bash
-   uvicorn app.main:app --reload
+   python main.py
    ```
